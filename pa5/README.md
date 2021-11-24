@@ -2,85 +2,113 @@
 
 Documentation for correctly using the exploit generator. There is one directory, named exploitWin, which contains relevant files.
 
-# Exploiting the Winamp Bento skin
+# Exploiting the Java Network Launch protocol in IE8
 
-## Create the .maki file
+## Running the exploit
 
-There is only one file here, `win_amp.pl` which generates the contents for the `mcvcore.maki` file. 
+To use this exploit, place the `heaplib.js` and `jnlp.html` files in the Apache web server location (for example, on Kali this is at `/var/www/html/jnlp`). Make sure Apache is running as shown in the following figure:
 
-On the Windows VM, place the perl script at the path `C:\Program Files\Winamp\Skins\Bento\scripts`. Open the Admin Shell to the same location and run the following to create the .maki file:
+![Apache](res/Apache.png)
 
-```bash
-> perl win_amp.pl>mcvcore.maki
+On the windows machine, open a Admin Shell to receive the reverse_shell and use the following netcat command:
+
 ```
-
-## Find the Offset 
-
-For this exploit to work correctly, it is necessary to exactly overwrite the SEH record words. 
-This is done by first finding a value that is sufficiently large to overflow the stack / cause an exception to be raised - 20000 bytes is experimentally found to be large enough. 
-With this, the metasploit tools are used to generate a pattern to find exactly the offset from the buffer to the SEH record. 
-
-To generate the pattern, the following was ran on the Kali machine:
-```bash
-$ cd /usr/share/metasploit-framework/tools/exploit
-$ ./pattern_create -l 20000
-```
-
-This pattern is used as the value for the string $function_name in the original perl script. 
-
-With Winamp monitored with WinDBG, when the skin is changed to Bento, an exception will be thrown. The following command will show the values in the SEH record:
-
-![Exchain_Windbg](res/Exchain_Windbg.png)
-
-These values are used to find the offset, particularly the second value (6d56356d above, which is the contents of the first word of the SEH record). This is seen below, and the size 16756 is determined to be the exact offset from the start of the buffer to the start of the SEH record.
-
-![Finding_the_offset](res/Finding_the_offset.png)
-
-## Filling the two SEH record values
-
-The first four bytes of the SEH record will be filled with a `NOP NOP JMP 04`. 
-This way when the execution returns (described next), the code jumps to the shell code with is located immediately after the SEH record.
-
-The second four bytes of the SEH record is treated as a pointer to the exception handler implementation. 
-Using both Gnarly in WinDBG and msfpescan on Kali, a location containing a code segment of POP POP RET instructions is found in one of the dynamically linked libraries. 
-Two pops is needed as it is found that the initial steps Windows takes, before the first SEH record is called, pushes two values on the stack, and they need to be cleared in order to continue execution at the location of the `NOP NOP JMP 04`.  
-
-This figure shows the output of the `!nmod` command from Gnarly. The best .dll's to use for this exploit should avoid the *ASLR protections. 
-
-![nmod_for_winamp](res/nmod_for_winamp.png)
-
-For example, the `nscrt.dll` library is examined and found to contain many possible memory locations containing the desired sequence. 
-There are a few specifications to follow when choosing a location: (1) the address itself should avoid too many consecutive zeros, (2) the pops should be for the edi, esi, and ecx registers, and (3) the return should be empty. 
-
-This figure shows the result of using msfpescan to find a code location. The address `0x7c34272e` is used in the script.  
-
-![msfpescan_for_pop_pop_ret](res/msfpescan_for_pop_pop_ret.png)
-
-## Generating the Shell code
-
-Creating the shell byte code is similar to previous assignments. 
-Use msfconsole to create a reverse_shell which targets a specific OS, at a specific listening port/address, and use an encoder if desired.
-The shell code used is the `windows/shell_reverse_tcp` and is specified for the address `127.0.0.1` at port `4444`. This shell also uses the alpha_numeric encoding. 
-The following two figures demonstrate this process:
-
-![Customizing_Payload](res/Customizing_Payload.png)
-
-![Generating_Shellcode](res/Generating_Shellcode.png)
-
-## Do the exploit
-
-After creating the `mcvcore.maki` file in the correct location as described above, the last step needed is to set a shell with netcat to receive the shell.
-
-In the shell, run the command:
-
-```bash
 > nc -l -p 4444 -nvv
 ```
 
-With this, open Winamp and change the skin to Bento. A shell should open in shell as shown below.
+Next, open IE8 and navigate to the webserver location (`192.168.180.10/jnlp/jnlp.html`) and click the button.
+This exploit is perhaps not the most interesting when shown through a screenshot, but a demonstration of a working exploit flow is shown on the next page.
 
 ![Working_Exploit](res/Working_Exploit.png)
 
-## Modifications
+<div style="page-break-after: always;"></div>
 
-This perl script shouldn't need any modifications, however, if my assumption that all of these values are consistent across the VMs is incorrect then the parameters can be easily modified following the outlined steps above. In the perl script, there are well-labled variables that would simply need the values modified (namely, size of the offset and the location of the `POP POP RET`).
+# Thought Process
+
+High level, this exploit works by spraying the heap with a ROP Chain + Shell code + NOP sleds, flipping the stack to be able to execute the ROP chain which itself is used to overcome DEP by calling VirtualProtect to make the heap executable.
+
+In order to do this the exploit needs (1) to know the offset for the buffer overflow, (2) to find gadgets for flipping and calling VirtualProtect, (3) to discover the address of VirtualProtect, (4) and to generate a reverse shell. 
+
+## Finding Offset
+
+This is similar to previous assignments. Using the metasploit framework, a pattern is generated and then relevant substrings of the pattern are used to find desired offsets. An offset of 800 bytes is found to overflow the buffer, so after creating a pattern of that size and creating a crash on IE8, the registers are shown in WinDBG.
+
+![Offset(WinDBG_reg)](res/Offset(WinDBG_reg).png)
+
+While not obvious here, a prior example with all As made clear the registers `eip`, `ecx`, and `ebp` are possible to control. The next image demonstrates using metasploit to find different offsets to the registers. In particular to this exploit are the offsets 392 to `eip` and 388 to `ebp`.
+
+![Offset(pattern_offset)](res/Offset(pattern_offset).png)
+
+<div style="page-break-after: always;"></div>
+
+## Finding Gadgets
+
+In order to flip the stack or to call VirtualProtect to execute the shell, ROP gadgets need to be found in a consistent location. Candidate libraries are found using narly in WinDBG, and the .dll `MSVCR71` is arbitrarily selected. Everything needed for this exploit can be found in this library.
+
+### Flipping Stack
+
+Flipping the stack is possible given that this buffer overflow allows for the `eip` and `ebp` registers to be controlled. To do this, the `eip` is overwritten with the address of a `leave; ret` gadget and the `ebp` register overwritten with the heap address to "flip". 
+
+This is the case as `leave; ret` is ultimately the same as `mov esp, ebp; pop ebp; ret`. So `ebp` is put into `esp`, the top of stack is popped, and then control returns to the new location of `esp`. 
+
+Skyrack is used to find this gadget as shown in the following image. In order to use `sky_search`, a database needs to be built from the .dll.
+
+```
+$ sky_build_db msvcr71.dll
+$ sky_search -f msvcr71.dll_PE_ia32.sqlite3 -a 'leave' -a 'ret'
+```
+
+![leave;ret](res/leave;ret.png)
+
+### Calling Virtual Protect
+
+Finding ROP Gadgets for calling VirtualProtect is the same as discussed above (the next section discusses how to get the actual address), except for different functions. The chain used is the one recommended by Professor Bardas in class, that is:
+
+| `pop eax; ret` |
+| Virtual Protect Address |
+| `mov eax, [eax]; ret` |
+| `call eax; ret` |
+| fn params |
+
+The slightly similar chain is not used as `call [eax]` is not found in MSVCR71.dll. The following image shows all the found gadget locations with Skyrack.
+
+![All_Gadgets](res/All_Gadgets.png)
+
+
+## Finding Virtual Protect
+
+To use the above ROP chain to make the shell code executable, the address of the VirtualProtect function is required. Unfortunately, kernerl32.dll (which contains the function) is protected with ASLR and DEP. To overcome these protections, MSVCR71.dll is again examined to see if it contains a function stub to VirtualProtect. This will provide a consistent function pointer (that is, value of the pointer changes but the actual location of the pointer does not) which holds the address used in the ROP chain.
+
+This is found with WinDBG, using narly and the commands `!dh` and `dps`. Narly is first used to get a list of all shared libraries, MSVCR71.dll is picked since it has no ASLR or DEP protections. The header of the library is examined as follows:
+
+```
+!dh mxvcr71
+```
+
+and the offset for the Import Address Table Directory is examined (as seen in the next image).
+
+![Address_of_IATD](res/Address_of_IATD.png)
+
+The next command dumps all the stubs (function pointers) to various shared libraries, and the VirtualProtectStub is found as seen in the next image (@7c37a140):
+
+```
+dps msvcr71+3A000
+```
+![Virtual_Protect_Stub](res/Virtual_Protect_Stub.png)
+
+<div style="page-break-after: always;"></div>
+
+## Shell Code
+
+Shell code is generated with msfconsole as discussed in previous assignments. Difference here is that javascript (little-endian) is targeted and no encoder is necessary. This script sends the shell to 127.0.0.1 on port 4444.
+
+![generateShellCode](res/generateShellCode.png)
+
+## Misc
+
+The parameters for the VirtualProtect function were given as follows (from the slides):
+
+![VirtualProtect_Parameters](res/VirtualProtect_Parameters.png)
+
+Because of the first parameter, the heap address that is used to overwrite `ebp` is 0x0a0a2020. This way, the ROP chain executes and returns safely within the executable range of memory (shell code is a few hundred bytes and the range of newly executable heap memory is 0x4000).
+
